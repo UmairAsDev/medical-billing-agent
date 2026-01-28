@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: billing_agent_api
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - chroma_db
+    volumes:
+      # Mount source for hot-reloading (Local Dev only)
+      - ./src:/app/src 
+
+  chroma_db:
+    image: chromadb/chroma:latest
+    container_name: vector_store
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+volumes:
+  chroma_data:
