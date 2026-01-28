@@ -20,10 +20,16 @@ from src.app.renderers import html_render_node
 
 
 async def serialized_retrieval_node(state: dict) -> dict:
+    """
+    Execute retrieval queries serially to accumulate billing codes.
+    
+    This node runs each retrieval query from the plan and deduplicates
+    the results to build a comprehensive set of allowed billing codes.
+    """
     retrieval_plan = state.get("retrieval_plan", [])
     
     if not retrieval_plan:
-        return {**state, "retrieved_docs": [], "has_incomplete_vectorstore_data": False}
+        return {**state, "retrieved_docs": []}
     
     seen = set()
     all_docs = []
@@ -47,22 +53,7 @@ async def serialized_retrieval_node(state: dict) -> dict:
                 seen.add(key)
                 all_docs.append(doc)
 
-    # Check if any retrieved procedure docs have missing/empty descriptions
-    # This determines whether to use previous superbill as fallback
-    has_incomplete_data = False
-    for doc in all_docs:
-        meta = doc.get("metadata", {})
-        if meta.get("type") == "procedure":
-            code_desc = meta.get("codeDesc", "")
-            if not code_desc or code_desc.strip() == "":
-                has_incomplete_data = True
-                break
-
-    return {
-        **state, 
-        "retrieved_docs": all_docs,
-        "has_incomplete_vectorstore_data": has_incomplete_data
-    }
+    return {**state, "retrieved_docs": all_docs}
 
 
 
