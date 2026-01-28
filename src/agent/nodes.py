@@ -63,18 +63,73 @@ def prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
     for mod in modifier_rules:
         modifier_rules_text += f"\n**Modifier {mod.get('modifier')}** (E/M applicable: {mod.get('enmModifier', False)}):\n{mod.get('details', '')}\n"
 
+    # Check if vectorstore has incomplete data
+    has_incomplete_data = state.get("has_incomplete_vectorstore_data", False)
+    
+    # Extract previous superbill - ONLY use as fallback when vectorstore is incomplete
+    # Note: patient data is stored under 'cleaned_patient_data' key
+    cleaned_patient_data = state.get("cleaned_patient_data", {})
+    # Get the first note's data (keyed by note_id)
+    note_id = state.get("note_id")
+    note_data = cleaned_patient_data.get(note_id, {}) if note_id else {}
+    previous_superbill = note_data.get("previous_superbill", [])
+    previous_code_map = state.get("previous_code_map", {})
+    
+    # Build previous superbill mapping ONLY if vectorstore has incomplete data
+    prev_superbill_text = ""
+    if has_incomplete_data and previous_superbill:
+        prev_superbill_text = "\n### FALLBACK: PREVIOUS SUPERBILL MAPPING\n"
+        prev_superbill_text += "**NOTE**: Vectorstore has incomplete procedure descriptions. Using previous superbill as reference:\n"
+        for item in previous_superbill:
+            proc_name = item.get("Procedure", "")
+            cpt = item.get("CPT", "")
+            mod = item.get("modifierId", "")
+            qty = item.get("Quantity", 1)
+            charge_per_unit = item.get("Charge Per Unit", "NO")
+            dx = item.get("GROUP_CONCAT(dc.icd10Code SEPARATOR ', ')", "")
+            prev_superbill_text += f"- {proc_name} → CPT: {cpt}"
+            if mod:
+                prev_superbill_text += f" (Modifier: {mod})"
+            prev_superbill_text += f" Qty: {qty}, ChargePerUnit: {charge_per_unit}, Dx: {dx}\n"
+        prev_superbill_text += "\n**IMPORTANT**: If the current note has the same procedure names, use the EXACT CPT codes from above.\n"
+
+    # Extract context
+    context = state.get("context", "")
+    
+    # Build the prompt based on whether we have complete vectorstore data
+    if has_incomplete_data:
+        critical_rules = """
+### CRITICAL BILLING RULES - READ CAREFULLY:
+
+1. **VECTORSTORE HAS INCOMPLETE DATA** - Some procedure codes have missing descriptions.
+   CHECK THE PREVIOUS SUPERBILL MAPPING below for procedure name to CPT code mappings.
+
+2. If the current clinical context has the SAME procedure names as previous superbill, 
+   you MUST use the SAME CPT codes.
+
+3. Match procedure names from clinical context to the CPT codes from previous superbill
+
+4. Include appropriate ICD-10 diagnosis codes from the context
+
+5. APPLY MODIFIERS according to the modifier rules below
+"""
+    else:
+        critical_rules = """
+### CRITICAL BILLING RULES - READ CAREFULLY:
+
+1. **ONLY use CPT codes from the Allowed PROCEDURE CPT Rules list** - DO NOT invent codes
+
+2. Match procedure names from clinical context to the allowed CPT codes
+
+3. Include appropriate ICD-10 diagnosis codes from the context
+
+4. APPLY MODIFIERS according to the modifier rules below
+"""
+    
     prompt = f"""
 You are a medical billing expert for dermatology.
-
-You MUST follow these rules strictly:
-1. You are NOT allowed to invent CPT, modifier, or E/M codes - ONLY use codes from the allowed lists below
-2. Match procedures from the clinical context to the most appropriate CPT codes
-3. Pay attention to procedure names, quantities, sizes, and diagnosis (benign vs malignant)
-4. For biopsies: Use 11100 for first biopsy, 11101 for each additional biopsy
-5. For destructions: Match to benign (17110/17111) vs malignant (17260-17286) vs premalignant (17000-17004) based on diagnosis
-6. Include appropriate ICD-10 diagnosis codes from the context
-7. APPLY MODIFIERS according to the rules below - this is critical for proper billing
-
+{critical_rules}
+{prev_superbill_text}
 ### Suggested Modifiers for this Context
 {json.dumps(possible_modifiers, indent=2)}
 
@@ -82,10 +137,10 @@ You MUST follow these rules strictly:
 {modifier_rules_text if modifier_rules_text else "No specific modifier rules retrieved"}
 
 ### KEY MODIFIER APPLICATION GUIDANCE:
-- When E/M visit occurs WITH procedures on same day: Apply modifier from rules that allows E/M + procedure billing
-- When multiple DIFFERENT procedures at different sites: Apply modifier for distinct procedural services
-- When procedure has laterality (left/right): Apply appropriate side modifier
-- When same procedure repeated: Apply repeat procedure modifier
+- When E/M visit occurs WITH procedures on same day: Apply modifier 25 to E/M code
+- When multiple DIFFERENT procedures at different sites: Apply modifier 59 for distinct procedural services
+- When procedure has laterality (left/right): Apply appropriate LT/RT modifier
+- When same procedure repeated: Apply repeat procedure modifier 76
 
 ### Procedures Identified in Context
 {json.dumps(procedure_names, indent=2)}
@@ -93,14 +148,14 @@ You MUST follow these rules strictly:
 ### Diagnosis Context
 {json.dumps(diagnosis_context, indent=2)}
 
-### Allowed PROCEDURE CPT Rules
+### Allowed PROCEDURE CPT Rules (USE ONLY THESE CODES)
 {json.dumps(procedure_rules, indent=2)}
 
 ### Allowed E/M Rules
 {json.dumps(enm_rules, indent=2)}
 
 ### Patient Clinical Context
-{state.get("context", "")}
+{context}
 
 ### REQUIRED OUTPUT (STRICT JSON)
 Return a JSON object with:
@@ -142,6 +197,7 @@ async def billing_retriever_node(state: Dict[str, Any]) -> Dict[str, Any]:
     all_docs = []
     retrieval_plan = state.get("retrieval_plan", [])
 
+    # First, do semantic search based on retrieval plan
     for item in retrieval_plan:
         query = item.get("query", "")
         doc_type = item.get("type", "")
@@ -149,10 +205,10 @@ async def billing_retriever_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not query or not doc_type:
             continue
             
-        # Retrieve more documents to increase chances of getting relevant codes
+        # Retrieve documents based on semantic similarity
         docs = vectorstore.similarity_search(
             query=query,
-            k=10,  # Increased from 5 to get more relevant results
+            k=10,
             filter={"type": doc_type}
         )
 
@@ -170,7 +226,23 @@ async def billing_retriever_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "metadata": doc.metadata
                 })
 
-    return {**state, "retrieved_docs": all_docs}
+    # Check if retrieved procedure docs have proper descriptions
+    # If not, we'll need to use previous superbill as fallback
+    has_incomplete_docs = False
+    for doc in all_docs:
+        meta = doc.get("metadata", {})
+        if meta.get("type") == "procedure":
+            code_desc = meta.get("codeDesc", "")
+            if not code_desc or code_desc.strip() == "":
+                has_incomplete_docs = True
+                break
+
+    # Store flag for prompt_node to use previous superbill when needed
+    return {
+        **state, 
+        "retrieved_docs": all_docs,
+        "has_incomplete_vectorstore_data": has_incomplete_docs
+    }
 
 
 
@@ -246,6 +318,12 @@ Clinical Context:
 
 def retrieval_plan_node(state: Dict[str, Any]) -> Dict[str, Any]:
     intent = state.get("retrieval_intent", {})
+    
+    # Get previous superbill from cleaned_patient_data
+    cleaned_patient_data = state.get("cleaned_patient_data", {})
+    note_id = state.get("note_id")
+    note_data = cleaned_patient_data.get(note_id, {}) if note_id else {}
+    
     plan = []
     seen_queries = set()
 
@@ -255,6 +333,18 @@ def retrieval_plan_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if key not in seen_queries:
             seen_queries.add(key)
             plan.append({"type": query_type, "query": query})
+
+    # Store previous superbill codes for potential fallback use
+    previous_superbill = note_data.get("previous_superbill", [])
+    previous_codes = set()
+    previous_code_map = {}  # Maps procedure name to CPT code
+    for item in previous_superbill:
+        cpt = item.get("CPT", "")
+        procedure_name = item.get("Procedure", "")
+        if cpt:
+            previous_codes.add(cpt)
+            if procedure_name:
+                previous_code_map[procedure_name.lower().strip()] = cpt
 
     # Build queries from exact procedure names (most specific)
     for proc_name in intent.get("procedure_names", []):
@@ -286,8 +376,14 @@ def retrieval_plan_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # Modifier queries
     for mod in intent.get("possible_modifiers", []):
         add_query("modifier", f"modifier {mod} billing rules")
-
-    return {**state, "retrieval_plan": plan}
+    
+    # Store previous codes and mapping for potential fallback use by other nodes
+    return {
+        **state, 
+        "retrieval_plan": plan, 
+        "previous_superbill_codes": list(previous_codes),
+        "previous_code_map": previous_code_map
+    }
 
 
 
@@ -349,13 +445,36 @@ async def patient_data_node(state: dict) -> dict:
 def billing_logic_node(state: dict) -> dict:
     llm_output = state.get("llm_response", {})
     retrieved_docs = state.get("retrieved_docs", [])
+    has_incomplete_data = state.get("has_incomplete_vectorstore_data", False)
+    
+    # Get previous superbill from cleaned_patient_data
+    cleaned_patient_data = state.get("cleaned_patient_data", {})
+    note_id = state.get("note_id")
+    note_data = cleaned_patient_data.get(note_id, {}) if note_id else {}
+    previous_superbill = note_data.get("previous_superbill", [])
 
+    # Build rules from retrieved docs
     rules = {}
     for d in retrieved_docs:
         meta = d.get("metadata", {})
         key = meta.get("proCode") or meta.get("enmCode")
         if key:
             rules[key] = meta
+
+    # If vectorstore has incomplete data, add rules from previous superbill as fallback
+    if has_incomplete_data:
+        for item in previous_superbill:
+            cpt = item.get("CPT", "")
+            if cpt and cpt not in rules:
+                # Create a minimal rule from previous superbill
+                rules[cpt] = {
+                    "proCode": cpt,
+                    "codeDesc": item.get("Procedure", ""),
+                    "ChargePerUnit": item.get("Charge Per Unit", "NO") == "YES",
+                    "minQty": 1,
+                    "maxQty": 10,  # Default max
+                    "type": "procedure"
+                }
 
     bill_items = []
 
@@ -366,10 +485,11 @@ def billing_logic_node(state: dict) -> dict:
             continue
 
         qty = proc.get("quantity", 1)
-        min_qty = int(rule.get("minQty", 1))
-        max_qty = int(rule.get("maxQty", 1))
+        min_qty = int(rule.get("minQty", 1) or 1)
+        max_qty = int(rule.get("maxQty", 1) or 1)
 
-        if not rule.get("ChargePerUnit"):
+        charge_per_unit = rule.get("ChargePerUnit", False)
+        if not charge_per_unit:
             qty = 1
         else:
             qty = max(min(qty, max_qty), min_qty)
@@ -378,17 +498,21 @@ def billing_logic_node(state: dict) -> dict:
             "code": code,
             "quantity": qty,
             "modifiers": proc.get("modifiers", []),
-            "dxCodes": proc.get("dxCodes", [])
+            "dxCodes": proc.get("dxCodes", []),
+            "description": rule.get("codeDesc", ""),
+            "chargePerUnit": charge_per_unit
         })
 
     enm = llm_output.get("enm", {})
     
     # Ensure E/M has all required fields
     if enm:
+        enm_rule = rules.get(enm.get("code"), {})
         enm = {
             "code": enm.get("code"),
             "modifiers": enm.get("modifiers", []),
-            "dxCodes": enm.get("dxCodes", [])
+            "dxCodes": enm.get("dxCodes", []),
+            "description": enm_rule.get("enmCodeDesc", "Evaluation & Management")
         }
 
     return {

@@ -70,6 +70,7 @@ def ingest_data():
         metadatas.append({
             "type": "procedure",
             "proCode": safe(row.proCode),
+            "codeDesc": safe(row.codeDesc),  # Added procedure description
             "addOn": bool(row.addOn) if not pd.isna(row.addOn) else False,
             "minQty": safe(row.minQty),
             "maxQty": safe(row.maxQty),

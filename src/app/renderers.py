@@ -11,8 +11,17 @@ def html_render_node(state: dict) -> dict:
         if meta.get("type") == "procedure":
             code = meta.get("proCode")
             if code:
+                desc = meta.get("codeDesc") or ""
+                # If description is empty, try to extract from content
+                if not desc:
+                    content = doc.get("content", "")
+                    if "Description:" in content:
+                        try:
+                            desc = content.split("Description:")[1].split("\n")[0].strip()
+                        except:
+                            desc = ""
                 proc_info[code] = {
-                    "description": meta.get("codeDesc", "Procedure"),
+                    "description": desc if desc else "Procedure",
                     "chargePerUnit": meta.get("ChargePerUnit", False)
                 }
         elif meta.get("type") == "enm":
@@ -28,8 +37,9 @@ def html_render_node(state: dict) -> dict:
     for item in bill_items:
         code = item["code"]
         info = proc_info.get(code, {})
-        desc = info.get("description", "Procedure")
-        per_unit = "Yes" if info.get("chargePerUnit", False) else "No"
+        # Also check if description was provided in bill_item itself
+        desc = item.get("description") or info.get("description", "Procedure")
+        per_unit = "Yes" if info.get("chargePerUnit", False) or item.get("chargePerUnit", False) else "No"
         
         rows.append(f"""
         <tr>
@@ -45,7 +55,8 @@ def html_render_node(state: dict) -> dict:
     # E/M row last (matching your image format)
     if enm and enm.get("code"):
         enm_code = enm["code"]
-        enm_desc = enm_info.get(enm_code, {}).get("description", "Office visit")
+        # First check if description was passed from billing_logic_node
+        enm_desc = enm.get("description") or enm_info.get(enm_code, {}).get("description", "Office visit")
         enm_dx = enm.get("dxCodes", [])
         
         rows.append(f"""

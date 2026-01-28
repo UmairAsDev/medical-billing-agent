@@ -23,7 +23,7 @@ async def serialized_retrieval_node(state: dict) -> dict:
     retrieval_plan = state.get("retrieval_plan", [])
     
     if not retrieval_plan:
-        return {**state, "retrieved_docs": []}
+        return {**state, "retrieved_docs": [], "has_incomplete_vectorstore_data": False}
     
     seen = set()
     all_docs = []
@@ -47,7 +47,22 @@ async def serialized_retrieval_node(state: dict) -> dict:
                 seen.add(key)
                 all_docs.append(doc)
 
-    return {**state, "retrieved_docs": all_docs}
+    # Check if any retrieved procedure docs have missing/empty descriptions
+    # This determines whether to use previous superbill as fallback
+    has_incomplete_data = False
+    for doc in all_docs:
+        meta = doc.get("metadata", {})
+        if meta.get("type") == "procedure":
+            code_desc = meta.get("codeDesc", "")
+            if not code_desc or code_desc.strip() == "":
+                has_incomplete_data = True
+                break
+
+    return {
+        **state, 
+        "retrieved_docs": all_docs,
+        "has_incomplete_vectorstore_data": has_incomplete_data
+    }
 
 
 
