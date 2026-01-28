@@ -1,0 +1,11 @@
+.venv/
+
+_build/
+__pycache__/
+
+data/
+logs/
+
+.env
+
+uv.lock
