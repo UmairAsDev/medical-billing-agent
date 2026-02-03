@@ -12,7 +12,7 @@ services:
     depends_on:
       - chroma_db
     volumes:
-      # Mount source for hot-reloading (Local Dev only)
+
       - ./src:/app/src 
 
   chroma_db:

@@ -119,8 +119,8 @@ def context_builder(cleaned_data: dict) -> str:
             prev_sb_section += (
                 f"- {item.get('Procedure', 'N/A')} "
                 f"(CPT: {item.get('CPT', 'N/A')}) "
-                f"x{item.get('Quantity', 1)}\n"
-                f"Charge per unit{item.get('Charge Per Unit', 'N/A')}"
+                f"x {item.get('Quantity', 1)}\n"
+                f"Charge per unit = {item.get('Charge Per Unit', 'N/A')}"
             )
             
     context = f"""

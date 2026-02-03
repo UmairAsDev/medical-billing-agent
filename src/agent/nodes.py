@@ -29,18 +29,286 @@ vectorstore = Chroma(
 
 
 
+# def prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
+#     """
+#     Build a clinical reasoning prompt for dermatology billing.
+    
+#     This node creates a comprehensive prompt that enables the LLM to reason
+#     about ANY dermatology scenario based on clinical understanding rather than
+#     hardcoded rules or pattern matching.
+#     """
+#     procedure_rules = []
+#     modifier_rules = []
+#     enm_rules = []
+#     retrieved_docs = state.get("retrieved_docs", [])
+
+#     for d in retrieved_docs:
+#         meta = d.get("metadata", {})
+#         content = d.get("content", "")
+
+#         doc_type = meta.get("type", "")
+#         if doc_type == "procedure":
+#             procedure_rules.append(meta)
+#         elif doc_type == "modifier":
+#             modifier_rules.append({
+#                 "modifier": meta.get("modifier"),
+#                 "enmModifier": meta.get("enmModifier"),
+#                 "details": content
+#             })
+#         elif doc_type == "enm":
+#             enm_rules.append(meta)
+
+
+#     intent = state.get("retrieval_intent", {})
+#     procedure_names = intent.get("procedure_names", [])
+#     diagnosis_context = intent.get("diagnosis_context", [])
+#     possible_modifiers = intent.get("possible_modifiers", [])
+
+
+#     modifier_rules_text = ""
+#     for mod in modifier_rules:
+#         modifier_rules_text += f"\n**Modifier {mod.get('modifier')}** (E/M applicable: {mod.get('enmModifier', False)}):\n{mod.get('details', '')}\n"
+
+
+#     cleaned_patient_data = state.get("cleaned_patient_data", {})
+#     note_id = state.get("note_id")
+#     note_data = cleaned_patient_data.get(note_id, {}) if note_id else {}
+#     previous_superbill = note_data.get("previous_superbill", [])
+    
+
+#     prev_superbill_text = ""
+#     if previous_superbill:
+#         prev_superbill_text = "\n### HISTORICAL REFERENCE: PREVIOUS SUPERBILL\n"
+#         prev_superbill_text += "This shows what was previously billed for this patient. Use as REFERENCE only:\n"
+#         for item in previous_superbill:
+#             proc_name = item.get("Procedure", "")
+#             cpt = item.get("CPT", "")
+#             mod = item.get("modifierId", "")
+#             qty = item.get("Quantity", 1)
+#             dx = item.get("GROUP_CONCAT(dc.icd10Code SEPARATOR ', ')", "")
+#             prev_superbill_text += f"- {proc_name} → CPT: {cpt}"
+#             if mod:
+#                 prev_superbill_text += f" (Modifier: {mod})"
+#             prev_superbill_text += f" Qty: {qty}, Dx: {dx}\n"
+
+#     context = state.get("context", "")
+    
+#     prompt = f"""
+# You are an expert dermatology medical billing coder. Your task is to analyze the clinical documentation 
+# and generate accurate CPT codes with appropriate modifiers and diagnosis codes.
+
+# ## CLINICAL REASONING APPROACH
+
+# You must reason through each patient encounter step by step:
+
+# ### STEP 1: IDENTIFY PROCEDURE CATEGORIES
+# Read the clinical context and identify which categories of procedures were performed:
+
+# **BIOPSY PROCEDURES** (sampling tissue for diagnosis)
+# - Skin biopsy (shave, punch, incisional, excisional)
+# - Primary code: First biopsy lesion
+# - Add-on codes: Additional biopsy lesions (+11101, +11107)
+
+
+# **DESTRUCTION PROCEDURES** (destroying lesions without removing tissue)
+# - Benign lesion destruction (17110, 17111) - warts, SK, etc.
+# - Premalignant lesion destruction (17000, 17003, 17004) - actinic keratoses
+# - Malignant lesion destruction (17260-17286) - by size and location
+
+# **EXCISION PROCEDURES** (surgically removing lesions)
+# - Benign excision (11400-11446) - by size and location
+# - Malignant excision (11600-11646) - by size and location
+# - Size includes excised diameter + margins
+
+# **MOHS SURGERY** (micrographic surgery for skin cancer)
+# - First stage (17311-17315) - by location and size
+# - Additional stages (+17312-+17315)
+# - Complex repair codes may follow
+
+# **RADIATION THERAPY** (for cancer treatment)
+# - Simulation/planning (77280, 77285, 77290)
+# - Treatment delivery (77401, 77402, etc.)
+# - Special procedure codes (G6001, G6002, etc.)
+# - Weekly E/M for radiation management
+
+# **REPAIR/CLOSURE** (wound closure after procedures)
+# - Simple repair (12001-12007)
+# - Intermediate repair (12031-12057)
+# - Complex repair (13100-13153)
+# - Adjacent tissue transfer/flaps (14000-14350)
+
+# **E/M SERVICES** (evaluation and management)
+# - New patient visits (99201-99205)
+# - Established patient visits (99211-99215)
+# - Consultations (99241-99245)
+# - If E/M on same day as procedure, MUST use modifier 25
+
+
+# ## MOHS BUNDLING RULES
+
+# - Simple repairs are INCLUDED in Mohs and must NOT be billed separately.
+# - Only bill intermediate/complex repairs, flaps, or grafts if clearly documented.
+
+# ## E/M BILLING RULES
+
+# - Apply modifier 25 ONLY if E/M is significant and separately identifiable.
+# - E/M diagnosis codes must reflect evaluation reasons, not procedural pathology alone.
+
+
+
+# ## DESTRUCTION QUANTITY RULES (STRICT)
+
+# - Actinic Keratosis:
+#   - 17000 → first lesion only
+#   - 17003 → 2–14 additional lesions
+#   - 17004 → 15 or more lesions
+
+# - Benign destruction:
+#   - 17110 → up to 14 lesions
+#   - 17111 → 15 or more lesions
+
+# Select CPT codes based ONLY on documented lesion counts.
+
+
+# ## CRITICAL ICD-10 & MEDICAL NECESSITY RULES
+
+# 1. ONLY assign ICD-10 codes explicitly supported by documentation.
+# 2. NEVER infer pathology results.
+#    - If biopsy performed and pathology is pending → use uncertain behavior ICD-10 (e.g., D48.5).
+# 3. Malignant ICD-10 codes REQUIRE confirmed documentation.
+# 4. EACH CPT must be medically justified by its linked ICD-10 code.
+# 5. If no valid ICD-10 supports a CPT → DO NOT bill the CPT.
+# 6. Do NOT reuse diagnosis codes across unrelated procedures.
+
+
+# ### STEP 2: MAP CLINICAL FINDINGS TO CODES
+# For each procedure identified in the clinical context:
+# 1. Determine the exact procedure type (what was done clinically)
+# 2. Find the matching CPT code from the ALLOWED CODES list
+# 3. Consider anatomical location and lesion size if relevant
+# 4. Determine quantity (how many lesions/sites)
+
+# ### STEP 3: APPLY DIAGNOSIS CODES
+# For each procedure:
+# 1. Link the appropriate ICD-10 diagnosis code(s)
+# 2. Primary diagnosis should be the reason for the procedure
+# 3. Include morphology-specific codes when available (benign vs malignant)
+
+# ### STEP 4: APPLY MODIFIERS
+# Apply modifiers based on clinical circumstances:
+# - **25**: E/M with significant, separately identifiable service on same day as procedure
+# - **59**: Distinct procedural service (different site, different lesion, different session)
+# - **LT/RT**: Left/Right laterality
+# - **50**: Bilateral procedure
+# - **76**: Repeat procedure by same physician
+# - **XE, XS, XP, XU**: Subset modifiers for distinct services
+
+
+# Do Not add any pathology-related procedures or codes unless explicitly documented.
+
+
+
+# {prev_superbill_text}
+
+# ### EXTRACTED PROCEDURE INFORMATION FROM CONTEXT
+# Procedures identified: {json.dumps(procedure_names, indent=2)}
+# Diagnosis terms: {json.dumps(diagnosis_context, indent=2)}
+# Possible modifiers needed: {json.dumps(possible_modifiers, indent=2)}
+
+# ### MODIFIER RULES FROM BILLING KNOWLEDGE BASE
+# {modifier_rules_text if modifier_rules_text else "Standard modifier rules apply"}
+
+# ### ALLOWED PROCEDURE CPT CODES (SELECT FROM THIS LIST)
+# {json.dumps(procedure_rules, indent=2)}
+
+# ### ALLOWED E/M CODES (SELECT FROM THIS LIST)
+# {json.dumps(enm_rules, indent=2)}
+
+# ### PATIENT CLINICAL CONTEXT
+# {context}
+
+# ## YOUR TASK
+
+# Analyze the clinical context above and:
+# 1. Identify ALL procedures performed during this encounter
+# 2. Match each procedure to the appropriate CPT code from the ALLOWED lists
+# 3. Assign correct quantities based on the number of lesions/sites treated
+# 4. Apply appropriate modifiers based on the clinical scenario
+# 5. Link diagnosis codes to each procedure
+
+# ## OUTPUT FORMAT (STRICT JSON)
+
+# Return a JSON object with:
+# - **procedures**: Array of procedure objects, each containing:
+#   - proCode: CPT code (MUST be from allowed list)
+#   - quantity: Number of units (based on lesion count or clinical documentation)
+#   - modifiers: Array of modifier codes (e.g., ["59", "LT"])
+#   - dxCodes: Array of ICD-10 codes for this procedure
+# - **enm**: E/M visit object (if applicable) containing:
+#   - code: E/M CPT code (MUST be from allowed E/M list)
+#   - modifiers: Array (use ["25"] if procedures also billed)
+#   - dxCodes: Array of diagnosis codes for the visit
+
+# Example:
+# {{
+#   "procedures": [
+#     {{
+#       "proCode": "11102",
+#       "quantity": 1,
+#       "modifiers": [],
+#       "dxCodes": ["D48.5"]
+#     }},
+#     {{
+#       "proCode": "11103",
+#       "quantity": 2,
+#       "modifiers": [],
+#       "dxCodes": ["D48.5"]
+#     }},
+#     {{
+#       "proCode": "17110",
+#       "quantity": 3,
+#       "modifiers": ["59"],
+#       "dxCodes": ["L82.0"]
+#     }}
+#   ],
+#   "enm": {{
+#     "code": "99214",
+#     "modifiers": ["25"],
+#     "dxCodes": ["D48.5", "L82.0"]
+#   }}
+# }}
+
+# IMPORTANT REMINDERS:
+# 1. ONLY use CPT codes that appear in the ALLOWED PROCEDURE or ALLOWED E/M lists
+# 2. If a procedure in the clinical context doesn't match any allowed code, skip it
+# 3. Apply modifier 25 to E/M when procedures are billed on the same day
+# 4. Apply modifier 59 when billing multiple distinct procedures
+# 5. Include ALL procedures documented, with appropriate quantities
+# """
+
+#     return {**state, "prompt": prompt}
+
+
+
+
+
+
 def prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build a clinical reasoning prompt for dermatology billing.
+    Build a clinical reasoning prompt for dermatology billing using retrieved vectorstore rules.
     
-    This node creates a comprehensive prompt that enables the LLM to reason
-    about ANY dermatology scenario based on clinical understanding rather than
-    hardcoded rules or pattern matching.
+    Forces the LLM to reason step-by-step:
+    1. Identify procedures
+    2. Map to CPT codes from retrieved docs
+    3. Assign correct quantities
+    4. Link ICD-10 (active/current year)
+    5. Apply modifiers
     """
+
+    retrieved_docs = state.get("retrieved_docs", [])
     procedure_rules = []
     modifier_rules = []
     enm_rules = []
-    retrieved_docs = state.get("retrieved_docs", [])
 
     for d in retrieved_docs:
         meta = d.get("metadata", {})
@@ -52,34 +320,30 @@ def prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         elif doc_type == "modifier":
             modifier_rules.append({
                 "modifier": meta.get("modifier"),
-                "enmModifier": meta.get("enmModifier"),
+                "enmModifier": meta.get("enmModifier", False),
                 "details": content
             })
         elif doc_type == "enm":
             enm_rules.append(meta)
 
-    # Get retrieval intent for additional context
     intent = state.get("retrieval_intent", {})
     procedure_names = intent.get("procedure_names", [])
     diagnosis_context = intent.get("diagnosis_context", [])
     possible_modifiers = intent.get("possible_modifiers", [])
 
-    # Format modifier rules as readable text
     modifier_rules_text = ""
     for mod in modifier_rules:
         modifier_rules_text += f"\n**Modifier {mod.get('modifier')}** (E/M applicable: {mod.get('enmModifier', False)}):\n{mod.get('details', '')}\n"
 
-    # Get previous superbill as historical reference
     cleaned_patient_data = state.get("cleaned_patient_data", {})
     note_id = state.get("note_id")
     note_data = cleaned_patient_data.get(note_id, {}) if note_id else {}
     previous_superbill = note_data.get("previous_superbill", [])
-    
-    # Build previous superbill reference
+
     prev_superbill_text = ""
     if previous_superbill:
         prev_superbill_text = "\n### HISTORICAL REFERENCE: PREVIOUS SUPERBILL\n"
-        prev_superbill_text += "This shows what was previously billed for this patient. Use as REFERENCE only:\n"
+        prev_superbill_text += "Reference only. Do not assume repeated billing:\n"
         for item in previous_superbill:
             proc_name = item.get("Procedure", "")
             cpt = item.get("CPT", "")
@@ -92,157 +356,84 @@ def prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             prev_superbill_text += f" Qty: {qty}, Dx: {dx}\n"
 
     context = state.get("context", "")
-    
+
     prompt = f"""
-You are an expert dermatology medical billing coder. Your task is to analyze the clinical documentation 
-and generate accurate CPT codes with appropriate modifiers and diagnosis codes.
+You are an expert dermatology medical billing coder.
 
-## CLINICAL REASONING APPROACH
+**Stepwise Clinical Reasoning Required**
+For each documented procedure:
+1. Identify procedure type.
+2. Determine exact CPT from **retrieved allowed CPT list** only.
+3. Apply quantity constraints (lesion count, first/additional lesion rules).
+4. Assign **active-year ICD-10 codes** linked to CPT.
+5. Apply appropriate modifiers based on clinical context and **retrieved modifier rules**.
 
-You must reason through each patient encounter step by step:
+**Rules**
+- Only use CPTs and E/M codes from retrieved vectorstore.
+- Only assign ICD-10 codes documented in patient note or allowed active-year codes.
+- Do NOT infer pathology results.
+- Mohs repairs and simple repairs are bundled as per rules.
+- Actinic keratosis destruction: 17000 → first, 17003 → 2–14 lesions, 17004 → 15+ lesions.
+- Do not reuse ICD-10 codes across unrelated procedures.
+- Apply modifier 25 only if E/M is separately identifiable.
 
-### STEP 1: IDENTIFY PROCEDURE CATEGORIES
-Read the clinical context and identify which categories of procedures were performed:
+**Reasoning Steps**
+1. Identify ALL procedures from clinical context.
+2. Match each to CPT from latest documentation.
+3. Determine quantities based on lesion/site counts.
+4. Apply ICD-10 codes to each CPT according to the ICD-10 documentation.
+5. Apply appropriate modifiers from the modifier rules.
 
-**BIOPSY PROCEDURES** (sampling tissue for diagnosis)
-- Skin biopsy (shave, punch, incisional, excisional)
-- Primary code: First biopsy lesion
-- Add-on codes: Additional biopsy lesions (+11101, +11107)
-
-**DESTRUCTION PROCEDURES** (destroying lesions without removing tissue)
-- Benign lesion destruction (17110, 17111) - warts, SK, etc.
-- Premalignant lesion destruction (17000, 17003, 17004) - actinic keratoses
-- Malignant lesion destruction (17260-17286) - by size and location
-
-**EXCISION PROCEDURES** (surgically removing lesions)
-- Benign excision (11400-11446) - by size and location
-- Malignant excision (11600-11646) - by size and location
-- Size includes excised diameter + margins
-
-**MOHS SURGERY** (micrographic surgery for skin cancer)
-- First stage (17311-17315) - by location and size
-- Additional stages (+17312-+17315)
-- Complex repair codes may follow
-
-**RADIATION THERAPY** (for cancer treatment)
-- Simulation/planning (77280, 77285, 77290)
-- Treatment delivery (77401, 77402, etc.)
-- Special procedure codes (G6001, G6002, etc.)
-- Weekly E/M for radiation management
-
-**REPAIR/CLOSURE** (wound closure after procedures)
-- Simple repair (12001-12007)
-- Intermediate repair (12031-12057)
-- Complex repair (13100-13153)
-- Adjacent tissue transfer/flaps (14000-14350)
-
-**E/M SERVICES** (evaluation and management)
-- New patient visits (99201-99205)
-- Established patient visits (99211-99215)
-- Consultations (99241-99245)
-- If E/M on same day as procedure, MUST use modifier 25
-
-### STEP 2: MAP CLINICAL FINDINGS TO CODES
-For each procedure identified in the clinical context:
-1. Determine the exact procedure type (what was done clinically)
-2. Find the matching CPT code from the ALLOWED CODES list
-3. Consider anatomical location and lesion size if relevant
-4. Determine quantity (how many lesions/sites)
-
-### STEP 3: APPLY DIAGNOSIS CODES
-For each procedure:
-1. Link the appropriate ICD-10 diagnosis code(s)
-2. Primary diagnosis should be the reason for the procedure
-3. Include morphology-specific codes when available (benign vs malignant)
-
-### STEP 4: APPLY MODIFIERS
-Apply modifiers based on clinical circumstances:
-- **25**: E/M with significant, separately identifiable service on same day as procedure
-- **59**: Distinct procedural service (different site, different lesion, different session)
-- **LT/RT**: Left/Right laterality
-- **50**: Bilateral procedure
-- **76**: Repeat procedure by same physician
-- **XE, XS, XP, XU**: Subset modifiers for distinct services
+**Historical Reference: Previous Superbill**
+- Check previous superbill for reference only.
 
 {prev_superbill_text}
 
-### EXTRACTED PROCEDURE INFORMATION FROM CONTEXT
-Procedures identified: {json.dumps(procedure_names, indent=2)}
-Diagnosis terms: {json.dumps(diagnosis_context, indent=2)}
-Possible modifiers needed: {json.dumps(possible_modifiers, indent=2)}
+### Procedures identified:
+{json.dumps(procedure_names, indent=2)}
 
-### MODIFIER RULES FROM BILLING KNOWLEDGE BASE
+### Diagnosis context:
+{json.dumps(diagnosis_context, indent=2)}
+
+### Possible modifiers:
+{json.dumps(possible_modifiers, indent=2)}
+
+### Modifier rules:
 {modifier_rules_text if modifier_rules_text else "Standard modifier rules apply"}
 
-### ALLOWED PROCEDURE CPT CODES (SELECT FROM THIS LIST)
+### Allowed CPT codes:
 {json.dumps(procedure_rules, indent=2)}
 
-### ALLOWED E/M CODES (SELECT FROM THIS LIST)
+### Allowed E/M codes:
 {json.dumps(enm_rules, indent=2)}
 
-### PATIENT CLINICAL CONTEXT
+### Patient clinical context:
 {context}
 
-## YOUR TASK
-
-Analyze the clinical context above and:
-1. Identify ALL procedures performed during this encounter
-2. Match each procedure to the appropriate CPT code from the ALLOWED lists
-3. Assign correct quantities based on the number of lesions/sites treated
-4. Apply appropriate modifiers based on the clinical scenario
-5. Link diagnosis codes to each procedure
-
-## OUTPUT FORMAT (STRICT JSON)
-
-Return a JSON object with:
-- **procedures**: Array of procedure objects, each containing:
-  - proCode: CPT code (MUST be from allowed list)
-  - quantity: Number of units (based on lesion count or clinical documentation)
-  - modifiers: Array of modifier codes (e.g., ["59", "LT"])
-  - dxCodes: Array of ICD-10 codes for this procedure
-- **enm**: E/M visit object (if applicable) containing:
-  - code: E/M CPT code (MUST be from allowed E/M list)
-  - modifiers: Array (use ["25"] if procedures also billed)
-  - dxCodes: Array of diagnosis codes for the visit
-
-Example:
+**Output STRICT JSON**:
 {{
   "procedures": [
     {{
-      "proCode": "11102",
-      "quantity": 1,
-      "modifiers": [],
-      "dxCodes": ["D48.5"]
-    }},
-    {{
-      "proCode": "11103",
-      "quantity": 2,
-      "modifiers": [],
-      "dxCodes": ["D48.5"]
-    }},
-    {{
-      "proCode": "17110",
-      "quantity": 3,
-      "modifiers": ["59"],
-      "dxCodes": ["L82.0"]
+      "proCode": "CPT from allowed list",
+      "quantity": "Number of lesions/sites",
+      "modifiers": ["25", "59", ...],
+      "dxCodes": ["ICD-10 active codes"]
     }}
   ],
   "enm": {{
-    "code": "99214",
-    "modifiers": ["25"],
-    "dxCodes": ["D48.5", "L82.0"]
+    "code": "E/M CPT from allowed list",
+    "modifiers": ["25" if applicable],
+    "dxCodes": ["ICD-10 codes for visit"]
   }}
 }}
 
-IMPORTANT REMINDERS:
-1. ONLY use CPT codes that appear in the ALLOWED PROCEDURE or ALLOWED E/M lists
-2. If a procedure in the clinical context doesn't match any allowed code, skip it
-3. Apply modifier 25 to E/M when procedures are billed on the same day
-4. Apply modifier 59 when billing multiple distinct procedures
-5. Include ALL procedures documented, with appropriate quantities
+Include **step-by-step reasoning** internally before final JSON output.
+Only include codes documented and allowed.
 """
 
     return {**state, "prompt": prompt}
+
+
 
 
 
@@ -259,7 +450,7 @@ async def billing_retriever_node(state: Dict[str, Any]) -> Dict[str, Any]:
     all_docs = []
     retrieval_plan = state.get("retrieval_plan", [])
 
-    # Do semantic search based on retrieval plan
+
     for item in retrieval_plan:
         query = item.get("query", "")
         doc_type = item.get("type", "")
@@ -267,7 +458,7 @@ async def billing_retriever_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not query or not doc_type:
             continue
             
-        # Retrieve documents based on semantic similarity
+
         docs = vectorstore.similarity_search(
             query=query,
             k=10,
@@ -311,77 +502,52 @@ async def retrieval_intent_node(state: Dict[str, Any]) -> Dict[str, Any]:
     prompt = f"""
 You are extracting billing intent from dermatology clinical documentation.
 
-Analyze the clinical context THOROUGHLY and extract ALL relevant information:
+STRICT RULES:
+- Do NOT infer pathology results.
+- Do NOT assume malignancy unless explicitly documented.
+- Distinguish E/M evaluation reasons from procedural diagnoses.
+- Extract ONLY what is clearly documented.
 
-## 1. PROCEDURE NAMES
-Extract EVERY procedure mentioned in the clinical documentation:
-- Look in structured sections like [BIOPSY PROCEDURES], [GENERAL PROCEDURES], [MOHS PROCEDURES], [RADIATION THERAPY]
-- Look for procedure descriptions in note text
-- Include: biopsies, destructions, excisions, mohs surgery, repairs, injections, radiation treatments
+Extract the following:
 
-Common dermatology procedures to look for:
+1. PROCEDURES (exactly as documented)
 - Biopsy (shave, punch, incisional, excisional)
-- Destruction Benign (warts, seborrheic keratosis, skin tags)
-- Destruction Premalignant (actinic keratosis, AK)
-- Destruction Malignant
-- Excision Benign / Excision Malignant (by size)
-- MOHS Micrographic Surgery (stages)
-- Simple/Intermediate/Complex Repair
-- Flap/Graft procedures
-- Radiation therapy (simulation, treatment delivery)
-- SRT (Superficial Radiation Therapy)
-- E/M visits
+- Destruction (benign, premalignant, malignant)
+- Excision (benign or malignant)
+- Mohs surgery (with stages)
+- Repairs (simple / intermediate / complex)
+- Flaps / grafts
+- Radiation therapy (simulation vs treatment)
+- Injections
+- E/M visit
 
-## 2. PROCEDURE CATEGORIES
-Classify procedures into billing categories:
-- biopsy
-- destruction_benign
-- destruction_premalignant  
-- destruction_malignant
-- excision_benign
-- excision_malignant
-- mohs
-- repair_simple
-- repair_intermediate
-- repair_complex
-- flap
-- graft
-- radiation_simulation
-- radiation_treatment
-- injection
-- evaluation_management
+2. PROCEDURE CATEGORIES
+Use ONLY these values:
+biopsy, destruction_benign, destruction_premalignant, destruction_malignant,
+excision_benign, excision_malignant, mohs,
+repair_simple, repair_intermediate, repair_complex,
+flap, graft, radiation_simulation, radiation_treatment,
+evaluation_management
 
-## 3. E/M LEVEL
-Determine the E/M service level if an office visit occurred:
-- Patient status: new vs established
-- Visit complexity: level 1-5
-- Format as: "established patient level 3" or "new patient level 4"
+3. E/M LEVEL
+Only if documented:
+- new patient level 1–5
+- established patient level 1–5
 
-## 4. MODIFIERS NEEDED
-Identify which modifiers should apply:
-- 25: E/M visit WITH procedures on same day (significant, separately identifiable)
-- 59: Distinct procedural service (different site, different lesion type, different session)
-- LT/RT: Left or Right laterality
-- 50: Bilateral procedure
-- 76: Repeat procedure same physician same day
-- XE: Separate encounter
-- XS: Separate structure
-- XP: Separate practitioner
-- XU: Unusual non-overlapping service
+4. MODIFIERS (only if clearly supported)
+25, 59, LT, RT, 50, 76, XE, XS, XP, XU
 
-## 5. DIAGNOSIS CONTEXT
-Extract diagnosis-related terms:
-- Benign vs Malignant vs Premalignant
-- Specific conditions (seborrheic keratosis, actinic keratosis, basal cell carcinoma, melanoma, etc.)
-- ICD-10 codes if mentioned
-- Anatomical locations
+5. DIAGNOSIS CONTEXT
+- Use clinical terms only
+- Include pathology status (confirmed vs pending vs suspected)
+- Include laterality and anatomical site if documented
 
-## 6. QUANTITY INDICATORS
-Look for quantity information:
-- Number of lesions treated
-- Number of biopsies performed
-- Number of destructions
-- Radiation treatment sessions/fractions
+6. QUANTITY INDICATORS
+- Lesion count
+- Biopsy count
+- Treatment sessions
+
+Return STRICT JSON only.
 
 Return STRICT JSON:
 {{
@@ -411,7 +577,7 @@ Clinical Context:
             "quantity_info": {}
         }
 
-    # Safety normalization
+
     intent["procedure_names"] = intent.get("procedure_names", []) or []
     intent["procedure_categories"] = intent.get("procedure_categories", []) or []
     intent["enm_level"] = intent.get("enm_level", "") or ""
@@ -442,15 +608,15 @@ def retrieval_plan_node(state: Dict[str, Any]) -> Dict[str, Any]:
             seen_queries.add(key)
             plan.append({"type": query_type, "query": query})
 
-    # Build queries from exact procedure names (most specific)
+
     for proc_name in intent.get("procedure_names", []):
         add_query("procedure", f"{proc_name} CPT code billing")
 
-    # Build queries from procedure categories with diagnosis context
+
     categories = intent.get("procedure_categories", [])
     diagnosis_terms = intent.get("diagnosis_context", [])
     
-    # Category-specific queries
+
     category_query_map = {
         "biopsy": ["skin biopsy CPT code", "shave biopsy", "punch biopsy", "excisional biopsy"],
         "destruction_benign": ["destruction benign lesion CPT", "17110 17111 destruction"],
@@ -476,31 +642,31 @@ def retrieval_plan_node(state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             add_query("procedure", f"Dermatology {category} CPT billing")
 
-    # Combine categories with diagnosis context for specificity
-    for category in categories:
-        for dx_term in diagnosis_terms[:3]:  # Limit to avoid too many queries
-            add_query("procedure", f"{category} {dx_term} CPT code")
 
-    # E/M level query
+    for category in categories:
+        for dx_term in diagnosis_terms[:2]:  
+            add_query("procedure", f"{category} {dx_term} dermatology CPT")
+
+
     enm_level = intent.get("enm_level", "")
     if enm_level:
         add_query("enm", f"{enm_level} E/M office visit billing")
     
-    # Also add generic E/M queries based on common patterns
+
     context = state.get("context", "").lower()
     if "new patient" in context:
         add_query("enm", "new patient office visit E/M code 99201 99205")
     if any(term in context for term in ["established", "followup", "follow-up", "f/u", "return"]):
         add_query("enm", "established patient office visit E/M code 99211 99215")
     
-    # Always get common E/M codes
+
     add_query("enm", "evaluation management dermatology office visit")
 
-    # Modifier queries based on identified modifiers
+
     for mod in intent.get("possible_modifiers", []):
         add_query("modifier", f"modifier {mod} when to use billing rules")
     
-    # Always include common modifier rules
+
     common_modifiers = ["25", "59"]
     for mod in common_modifiers:
         if mod not in intent.get("possible_modifiers", []):
@@ -567,17 +733,18 @@ async def patient_data_node(state: dict) -> dict:
 
 def billing_logic_node(state: dict) -> dict:
     """
-    Validate and finalize billing items from LLM response.
-    
-    This node:
-    1. Validates CPT codes against retrieved rules
-    2. Applies quantity constraints (ChargePerUnit, min/max)
-    3. Preserves modifiers and diagnosis codes from LLM
+    Validate and finalize billing items from LLM output using retrieved vectorstore rules.
+    Enforces:
+    - CPT only from retrieved docs
+    - ICD-10 active/current-year enforcement
+    - Quantity limits
+    - Modifier hierarchy
     """
+
     llm_output = state.get("llm_response", {})
     retrieved_docs = state.get("retrieved_docs", [])
 
-    # Build rules from retrieved docs
+
     rules = {}
     for d in retrieved_docs:
         meta = d.get("metadata", {})
@@ -589,50 +756,41 @@ def billing_logic_node(state: dict) -> dict:
 
     for proc in llm_output.get("procedures", []):
         code = proc.get("proCode", "")
-        if not code:
-            continue
-            
-        rule = rules.get(code)
-        
-        # Get quantity from LLM response
+        if not code or code not in rules:
+            continue  
+
+        rule = rules.get(code, {})
         qty = proc.get("quantity", 1)
-        
-        # Apply quantity constraints from rules if available
-        if rule:
-            min_qty = int(rule.get("minQty", 1) or 1)
-            max_qty = int(rule.get("maxQty", 99) or 99)
-            charge_per_unit = rule.get("ChargePerUnit", False)
-            
-            if not charge_per_unit:
-                qty = 1
-            else:
-                qty = max(min(qty, max_qty), min_qty)
-            
-            description = rule.get("codeDesc", "")
+
+
+        min_qty = int(rule.get("minQty", 1))
+        max_qty = int(rule.get("maxQty", 99))
+        charge_per_unit = rule.get("ChargePerUnit", True)
+        if not charge_per_unit:
+            qty = 1
         else:
-            # No rule found, but still include if LLM returned it
-            # The prompt instructed LLM to only use allowed codes
-            charge_per_unit = True  # Default to allowing quantity
-            description = ""
+            qty = max(min(qty, max_qty), min_qty)
+
+
+        dx_codes = [dx for dx in proc.get("dxCodes", []) if dx in rule.get("allowedICD10", [])]
 
         bill_items.append({
             "code": code,
             "quantity": qty,
             "modifiers": proc.get("modifiers", []),
-            "dxCodes": proc.get("dxCodes", []),
-            "description": description,
+            "dxCodes": dx_codes,
+            "description": rule.get("codeDesc", ""),
             "chargePerUnit": charge_per_unit
         })
 
+
     enm = llm_output.get("enm", {})
-    
-    # Ensure E/M has all required fields
-    if enm and enm.get("code"):
-        enm_rule = rules.get(enm.get("code"), {})
+    if enm and enm.get("code") and enm["code"] in rules:
+        enm_rule = rules.get(enm["code"], {})
         enm = {
-            "code": enm.get("code"),
+            "code": enm["code"],
             "modifiers": enm.get("modifiers", []),
-            "dxCodes": enm.get("dxCodes", []),
+            "dxCodes": [dx for dx in enm.get("dxCodes", []) if dx in enm_rule.get("allowedICD10", [])],
             "description": enm_rule.get("enmCodeDesc", "Evaluation & Management")
         }
     else:

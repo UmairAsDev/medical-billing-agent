@@ -200,6 +200,6 @@ async def main(note_id:int):
 
 
 
-# if __name__ == "__main__":
-#     note_id = 693071
-#     asyncio.run(main(note_id))
+if __name__ == "__main__":
+    note_id = 700726
+    asyncio.run(main(note_id))
